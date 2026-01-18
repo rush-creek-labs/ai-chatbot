@@ -1,6 +1,6 @@
 import { type NextRequest, NextResponse } from "next/server";
 import { getToken } from "next-auth/jwt";
-import { guestRegex, isDevelopmentEnvironment } from "./lib/constants";
+import { guestRegex } from "./lib/constants";
 
 export async function proxy(request: NextRequest) {
   const { pathname } = request.nextUrl;
@@ -13,28 +13,63 @@ export async function proxy(request: NextRequest) {
     return new Response("pong", { status: 200 });
   }
 
-  if (pathname.startsWith("/api/auth")) {
+  // Allow auth and health check endpoints without authentication
+  if (pathname.startsWith("/api/auth") || pathname.startsWith("/api/health")) {
     return NextResponse.next();
   }
+
+  // Determine if we should use secure cookies
+  // When AUTH_URL is set (e.g., CloudFront), use its protocol as the source of truth
+  // because CloudFront sets x-forwarded-proto to the origin protocol (http), not the viewer protocol
+  const authUrl = process.env.AUTH_URL;
+  const forwardedProto = request.headers.get("x-forwarded-proto");
+  const isHttps = authUrl?.startsWith("https://") ||
+                  forwardedProto === "https" ||
+                  request.nextUrl.protocol === "https:";
 
   const token = await getToken({
     req: request,
     secret: process.env.AUTH_SECRET,
-    secureCookie: !isDevelopmentEnvironment,
+    secureCookie: isHttps,
   });
 
   if (!token) {
-    const redirectUrl = encodeURIComponent(request.url);
+    // Build the external URL using AUTH_URL (most reliable for CloudFront/ALB setups)
+    // CloudFront doesn't forward x-forwarded-host, and Host header points to ALB
+    if (authUrl) {
+      // Use AUTH_URL as the canonical external URL
+      const baseUrl = authUrl.replace(/\/$/, ""); // Remove trailing slash if present
+      const externalUrl = `${baseUrl}${pathname}${request.nextUrl.search}`;
+      const redirectUrl = encodeURIComponent(externalUrl);
+
+      return NextResponse.redirect(
+        new URL(`/api/auth/guest?redirectUrl=${redirectUrl}`, baseUrl)
+      );
+    }
+
+    // Fallback: try forwarded headers (for non-CloudFront setups)
+    const forwardedHost = request.headers.get("x-forwarded-host");
+    const host = forwardedHost || request.nextUrl.host;
+    const protocol = forwardedProto || "http";
+    const externalUrl = `${protocol}://${host}${pathname}${request.nextUrl.search}`;
+    const redirectUrl = encodeURIComponent(externalUrl);
+    const baseUrl = `${protocol}://${host}`;
 
     return NextResponse.redirect(
-      new URL(`/api/auth/guest?redirectUrl=${redirectUrl}`, request.url)
+      new URL(`/api/auth/guest?redirectUrl=${redirectUrl}`, baseUrl)
     );
   }
 
   const isGuest = guestRegex.test(token?.email ?? "");
 
   if (token && !isGuest && ["/login", "/register"].includes(pathname)) {
-    return NextResponse.redirect(new URL("/", request.url));
+    if (authUrl) {
+      return NextResponse.redirect(new URL("/", authUrl));
+    }
+    const forwardedHost = request.headers.get("x-forwarded-host");
+    const host = forwardedHost || request.nextUrl.host;
+    const protocol = forwardedProto || "http";
+    return NextResponse.redirect(new URL("/", `${protocol}://${host}`));
   }
 
   return NextResponse.next();

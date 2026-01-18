@@ -43,6 +43,7 @@ Models are accessed via Amazon Bedrock. Claude models require inference profiles
 | `POSTGRES_URL` | Database connection string | AWS Secrets Manager |
 | `AUTH_SECRET` | NextAuth.js signing secret | AWS Secrets Manager |
 | `AUTH_TRUST_HOST` | Trust proxy headers (set to "true") | ECS Task Definition |
+| `AUTH_URL` | Public-facing URL (e.g., CloudFront domain) | ECS Task Definition |
 | `AWS_REGION` | AWS region (default: us-east-1) | ECS Task Definition |
 
 ## Prerequisites
@@ -338,6 +339,33 @@ const bedrock = createAmazonBedrock({
    ```
 3. Check CloudWatch logs: `/ecs/<service-name>`
 4. Ensure all environment variables are set correctly
+
+### ERR_TOO_MANY_REDIRECTS (Redirect Loop)
+
+**Error:** Browser shows `ERR_TOO_MANY_REDIRECTS` when accessing the application
+
+**Cause:** Cookie name mismatch between NextAuth session creation and token retrieval. This happens because:
+1. CloudFront uses `origin_protocol_policy = "http-only"` to connect to ALB
+2. CloudFront sets `x-forwarded-proto: http` (the origin protocol, not the viewer protocol)
+3. NextAuth creates secure cookies based on `AUTH_URL=https://...`
+4. But token retrieval looks for non-secure cookies based on `x-forwarded-proto: http`
+
+**Solution:** The `proxy.ts` middleware must detect HTTPS based on `AUTH_URL` when set:
+```typescript
+const authUrl = process.env.AUTH_URL;
+const forwardedProto = request.headers.get("x-forwarded-proto");
+const isHttps = authUrl?.startsWith("https://") ||
+                forwardedProto === "https" ||
+                request.nextUrl.protocol === "https:";
+
+const token = await getToken({
+  req: request,
+  secret: process.env.AUTH_SECRET,
+  secureCookie: isHttps,
+});
+```
+
+This ensures the cookie name matches what NextAuth created, regardless of CloudFront's internal protocol handling.
 
 ### Docker Build Fails
 

@@ -1,12 +1,20 @@
-import { gateway } from "@ai-sdk/gateway";
-import {
-  customProvider,
-  extractReasoningMiddleware,
-  wrapLanguageModel,
-} from "ai";
+import { createAmazonBedrock } from "@ai-sdk/amazon-bedrock";
+import { fromContainerMetadata, fromEnv } from "@aws-sdk/credential-providers";
+import { customProvider } from "ai";
 import { isTestEnvironment } from "../constants";
 
-const THINKING_SUFFIX_REGEX = /-thinking$/;
+// Create Bedrock provider with explicit credential chain for ECS
+const bedrock = createAmazonBedrock({
+  region: process.env.AWS_REGION || "us-east-1",
+  credentialProvider: async () => {
+    // Try container credentials first (ECS), then fall back to env vars (local dev)
+    try {
+      return await fromContainerMetadata()();
+    } catch {
+      return await fromEnv()();
+    }
+  },
+});
 
 export const myProvider = isTestEnvironment
   ? (() => {
@@ -32,31 +40,19 @@ export function getLanguageModel(modelId: string) {
     return myProvider.languageModel(modelId);
   }
 
-  const isReasoningModel =
-    modelId.includes("reasoning") || modelId.endsWith("-thinking");
-
-  if (isReasoningModel) {
-    const gatewayModelId = modelId.replace(THINKING_SUFFIX_REGEX, "");
-
-    return wrapLanguageModel({
-      model: gateway.languageModel(gatewayModelId),
-      middleware: extractReasoningMiddleware({ tagName: "thinking" }),
-    });
-  }
-
-  return gateway.languageModel(modelId);
+  return bedrock(modelId);
 }
 
 export function getTitleModel() {
   if (isTestEnvironment && myProvider) {
     return myProvider.languageModel("title-model");
   }
-  return gateway.languageModel("google/gemini-2.5-flash-lite");
+  return bedrock("amazon.nova-lite-v1:0");
 }
 
 export function getArtifactModel() {
   if (isTestEnvironment && myProvider) {
     return myProvider.languageModel("artifact-model");
   }
-  return gateway.languageModel("anthropic/claude-haiku-4.5");
+  return bedrock("us.anthropic.claude-3-5-haiku-20241022-v1:0");
 }
