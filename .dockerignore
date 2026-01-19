@@ -1,0 +1,44 @@
+# Dependencies
+node_modules
+
+# Build output
+.next
+out
+dist
+
+# Git
+.git
+.gitignore
+
+# IDE
+.vscode
+.idea
+*.swp
+*.swo
+
+# Environment files
+.env
+.env.*
+!.env.example
+
+# Documentation
+docs
+*.md
+LICENSE
+
+# Tests
+tests
+__tests__
+*.test.*
+*.spec.*
+playwright-report
+test-results
+
+# Infrastructure
+infrastructure
+.terraform
+
+# Misc
+.DS_Store
+Thumbs.db
+*.log

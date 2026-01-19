@@ -307,6 +307,7 @@ function PureMultimodalInput({
           />
         )}
 
+      {/* AWS DEPLOYMENT: File uploads not supported - Vercel Blob not available
       <input
         className="pointer-events-none fixed -top-4 -left-4 size-0.5 opacity-0"
         multiple
@@ -315,6 +316,7 @@ function PureMultimodalInput({
         tabIndex={-1}
         type="file"
       />
+      */}
 
       <PromptInput
         className="rounded-xl border border-border bg-background p-3 shadow-xs transition-all duration-200 focus-within:border-border hover:border-muted-foreground/50"
@@ -379,11 +381,13 @@ function PureMultimodalInput({
         </div>
         <PromptInputToolbar className="border-top-0! border-t-0! p-0 shadow-none dark:border-0 dark:border-transparent!">
           <PromptInputTools className="gap-0 sm:gap-0.5">
+            {/* AWS DEPLOYMENT: File uploads not supported - Vercel Blob not available
             <AttachmentsButton
               fileInputRef={fileInputRef}
               selectedModelId={selectedModelId}
               status={status}
             />
+            */}
             <ModelSelectorCompact
               onModelChange={onModelChange}
               selectedModelId={selectedModelId}

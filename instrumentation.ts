@@ -1,5 +1,6 @@
-import { registerOTel } from "@vercel/otel";
+// OpenTelemetry instrumentation disabled for AWS deployment
+// To re-enable, install @opentelemetry/sdk-node and configure for AWS X-Ray
 
 export function register() {
-  registerOTel({ serviceName: "ai-chatbot" });
+  // No-op for now
 }

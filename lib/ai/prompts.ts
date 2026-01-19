@@ -1,4 +1,3 @@
-import type { Geo } from "@vercel/functions";
 import type { ArtifactKind } from "@/components/artifact";
 
 export const artifactsPrompt = `
@@ -42,10 +41,10 @@ export const regularPrompt = `You are a friendly assistant! Keep your responses 
 When asked to write, create, or help with something, just do it directly. Don't ask clarifying questions unless absolutely necessary - make reasonable assumptions and proceed with the task.`;
 
 export type RequestHints = {
-  latitude: Geo["latitude"];
-  longitude: Geo["longitude"];
-  city: Geo["city"];
-  country: Geo["country"];
+  latitude: string | null;
+  longitude: string | null;
+  city: string | null;
+  country: string | null;
 };
 
 export const getRequestPromptFromHints = (requestHints: RequestHints) => `\
