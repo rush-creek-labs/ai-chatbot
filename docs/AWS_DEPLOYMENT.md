@@ -1,26 +1,32 @@
 # AWS Deployment Guide
 
-This document describes the AWS deployment architecture for the AI Chatbot.
+This document describes the AWS deployment architecture for the AI Chatbot using AWS App Runner.
 
 ## Architecture
 
 ```
-┌─────────────────┐     ┌─────────────────┐     ┌─────────────────┐
-│       ALB       │────▶│   ECS Fargate   │────▶│  RDS PostgreSQL │
-│ (Load Balancer) │     │  (Next.js app)  │     │   (db.t3.micro) │
-└─────────────────┘     └─────────────────┘     └─────────────────┘
-                                │
-                                │  IAM Role             ┌─────────────────┐
-                                └──────────────────────▶│ Amazon Bedrock  │
-                                                        │ (Claude, Nova)  │
-                                                        └─────────────────┘
+                    ┌─────────────────────────────────────────┐
+                    │           App Runner Services           │
+                    │  (created per item in apprunner_services) │
+                    └─────────────────┬───────────────────────┘
+                                      │
+                          ┌───────────┴───────────┐
+                          │    VPC Connector      │
+                          └───────────┬───────────┘
+                                      │
+        ┌─────────────────────────────┼─────────────────────────────┐
+        │                             │                             │
+        ▼                             ▼                             ▼
+┌───────────────┐           ┌─────────────────┐           ┌─────────────────┐
+│      RDS      │           │  VPC Endpoint   │           │  VPC Endpoint   │
+│  PostgreSQL   │           │    Bedrock      │           │ Secrets Manager │
+└───────────────┘           └─────────────────┘           └─────────────────┘
 ```
 
-- **CDN/HTTPS:** Amazon CloudFront (provides HTTPS with default certificate)
-- **Compute:** AWS ECS Fargate (containerized Next.js)
-- **Load Balancer:** Application Load Balancer (ALB)
+- **Compute:** AWS App Runner (containerized Next.js with automatic HTTPS)
 - **Database:** Amazon RDS PostgreSQL (db.t3.micro - free tier eligible)
 - **AI Models:** Amazon Bedrock (Claude 4.5/4/3.5 via inference profiles, Amazon Nova)
+- **Secrets:** AWS Secrets Manager
 - **Infrastructure:** Terraform
 
 ## Available AI Models
@@ -46,9 +52,9 @@ Models are accessed via Amazon Bedrock. Claude models require inference profiles
 |----------|-------------|--------|
 | `POSTGRES_URL` | Database connection string | AWS Secrets Manager |
 | `AUTH_SECRET` | NextAuth.js signing secret | AWS Secrets Manager |
-| `AUTH_TRUST_HOST` | Trust proxy headers (set to "true") | ECS Task Definition |
-| `AUTH_URL` | Public-facing URL (e.g., CloudFront domain) | ECS Task Definition |
-| `AWS_REGION` | AWS region (default: us-east-1) | ECS Task Definition |
+| `AUTH_TRUST_HOST` | Trust proxy headers (set to "true") | App Runner env vars |
+| `AUTH_URL` | Public-facing URL (optional with AUTH_TRUST_HOST) | App Runner env vars |
+| `AWS_REGION` | AWS region (default: us-east-1) | App Runner env vars |
 
 ## Prerequisites
 
@@ -73,9 +79,19 @@ Before deploying, you must enable access to the required models:
    - `amazon.nova-lite-v1:0` (Amazon Nova Lite)
 3. Wait for approval (usually instant for Nova, may take time for Claude)
 
+## Staged Deployment
+
+The infrastructure supports staged deployment via the `apprunner_services` variable:
+
+1. **Phase 1**: Deploy base infrastructure with `apprunner_services = []`
+2. **Phase 2**: Run database migrations and push Docker image
+3. **Phase 3**: Enable App Runner services with `apprunner_services = ["prod"]`
+
+This approach ensures the database is migrated and the Docker image is ready before App Runner tries to start.
+
 ## Deployment
 
-### Step 1: Deploy Infrastructure
+### Phase 1: Base Infrastructure
 
 ```bash
 cd infrastructure
@@ -83,81 +99,83 @@ cd infrastructure
 # Initialize Terraform
 terraform init
 
-# Create terraform.tfvars with your secrets (do not commit this file!)
+# Create terraform.tfvars (do not commit this file!)
 cat > terraform.tfvars << EOF
-aws_region   = "us-east-1"
-environment  = "prod"
-db_password  = "your-secure-database-password"
-auth_secret  = "$(openssl rand -base64 32)"
+db_password = "your-secure-database-password"
+auth_secret = "$(openssl rand -base64 32)"
+apprunner_services = []
 EOF
 
-# Review the plan
-terraform plan
-
-# Apply the infrastructure
+# Deploy base infrastructure
 terraform apply
 ```
 
-### Step 2: Run Database Migrations
+This creates:
+- ECR repository
+- RDS PostgreSQL database
+- Secrets Manager secrets
+- VPC endpoints (Bedrock, Secrets Manager)
+- VPC connector
+- Security groups
+- IAM roles
 
-After the infrastructure is created, run migrations before pushing the Docker image:
+### Phase 2: Database Migration & Image Push
 
 ```bash
-# Get the RDS endpoint from terraform output
+# Get outputs (from project root)
+ECR_URL=$(cd infrastructure && terraform output -raw ecr_repository_url)
 RDS_ENDPOINT=$(cd infrastructure && terraform output -raw rds_endpoint)
 
-# Run migrations (replace password with your db_password)
+# Run database migrations (replace YOUR_PASSWORD with your db_password)
 POSTGRES_URL="postgresql://chatbot_admin:YOUR_PASSWORD@$RDS_ENDPOINT/chatbot" pnpm db:migrate
-```
 
-### Step 3: Build and Push Docker Image
-
-```bash
-# Get ECR URL from terraform output
-ECR_URL=$(cd infrastructure && terraform output -raw ecr_repository_url)
-
-# Authenticate to ECR
-aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin $ECR_URL
-
-# Build the Docker image
+# Build and push Docker image
 docker build -t ai-chatbot .
-
-# Tag for ECR
+aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin $ECR_URL
 docker tag ai-chatbot:latest $ECR_URL:latest
-
-# Push to ECR
 docker push $ECR_URL:latest
 ```
 
-### Step 4: Force ECS Deployment
-
-After pushing the image, force ECS to deploy the new version:
+### Phase 3: Enable App Runner Services
 
 ```bash
-# Get cluster and service names
-CLUSTER=$(cd infrastructure && terraform output -raw ecs_cluster_name)
-SERVICE=$(cd infrastructure && terraform output -raw ecs_service_name)
+# Update terraform.tfvars to add services
+# apprunner_services = ["prod"]
 
-# Force new deployment
-aws ecs update-service --cluster $CLUSTER --service $SERVICE --force-new-deployment
+cd infrastructure && terraform apply
 ```
 
-### Step 5: Verify Deployment
+### Phase 4: Update AUTH_URL (Optional)
+
+With `AUTH_TRUST_HOST=true`, NextAuth.js automatically uses the Host header from incoming requests. This means **Phase 4 is optional** if authentication is working correctly.
+
+You may want to explicitly set `AUTH_URL` if:
+- You're using a custom domain
+- You want to hardcode the URL for security hardening
 
 ```bash
-# Get the app URL
-cd infrastructure && terraform output app_url
+# Get the service URL (from project root)
+cd infrastructure && terraform output apprunner_service_urls
 
+# Get the update command
+cd infrastructure && terraform output -json update_auth_url_commands | jq -r '.prod'
+
+# Run the update command (copy and execute the output)
+```
+
+### Verify Deployment
+
+```bash
 # Test health check
-curl http://<alb-dns-name>/api/health
+curl https://<service-url>/api/health
 ```
 
 ## Updating the Application
 
-To deploy updates:
+To deploy updates after the initial setup:
 
 ```bash
-# Build new image
+# Build new image (from project root)
 docker build -t ai-chatbot .
 
 # Tag and push
@@ -165,28 +183,33 @@ ECR_URL=$(cd infrastructure && terraform output -raw ecr_repository_url)
 docker tag ai-chatbot:latest $ECR_URL:latest
 docker push $ECR_URL:latest
 
-# Force new deployment
-CLUSTER=$(cd infrastructure && terraform output -raw ecs_cluster_name)
-SERVICE=$(cd infrastructure && terraform output -raw ecs_service_name)
-aws ecs update-service --cluster $CLUSTER --service $SERVICE --force-new-deployment
+# Trigger new deployment
+cd infrastructure && terraform output -json deployment_commands | jq -r '.prod'
+# Or directly:
+aws apprunner start-deployment --service-arn $(cd infrastructure && terraform output -json apprunner_service_arns | jq -r '.prod')
 ```
 
+## Multiple Environments
+
+To create multiple App Runner services (e.g., prod and staging):
+
+```hcl
+apprunner_services = ["prod", "staging"]
+```
+
+Each service gets:
+- Independent App Runner service
+- Separate auto-scaling configuration
+- Dedicated CloudWatch log group
+- Unique service URL
+
+All services share the same:
+- ECR repository (use different image tags if needed)
+- RDS PostgreSQL database
+- Secrets Manager secrets
+- VPC connector and endpoints
+
 ## Cost Breakdown
-
-### ECS Fargate (`infrastructure/`)
-
-| Service | Free Tier | Post-Free-Tier |
-|---------|-----------|----------------|
-| CloudFront | 1 TB/month (year 1) | ~$1-5/month |
-| ECS Fargate | None | ~$10-30/month |
-| ALB | None | ~$16-20/month |
-| RDS PostgreSQL | 750 hours/month (year 1) | ~$15-20/month |
-| Bedrock | Pay-per-token | ~$5-50/month |
-| Secrets Manager | N/A | ~$1/month |
-
-**Estimated monthly cost:** ~$50-125/month (varies with usage)
-
-### App Runner (`infrastructure-v2/`)
 
 | Service | Free Tier | Post-Free-Tier |
 |---------|-----------|----------------|
@@ -196,7 +219,7 @@ aws ecs update-service --cluster $CLUSTER --service $SERVICE --force-new-deploym
 | Bedrock | Pay-per-token | ~$5-50/month |
 | Secrets Manager | N/A | ~$1/month |
 
-**Estimated monthly cost:** ~$40-110/month (lower than ECS due to no ALB/CloudFront)
+**Estimated monthly cost:** ~$40-110/month (varies with usage)
 
 ## Differences from Vercel Deployment
 
@@ -207,176 +230,50 @@ aws ecs update-service --cluster $CLUSTER --service $SERVICE --force-new-deploym
 | Resumable Streams | Redis | Disabled |
 | Geolocation | @vercel/functions | Not available |
 
----
+## Known Limitations
 
-## Deployment Options Evaluated
+### No External Internet Access
 
-During development, we evaluated several AWS compute options. **Two options are now working:**
-
-| Option | Infrastructure | Status | Best For |
-|--------|---------------|--------|----------|
-| **ECS Fargate + ALB** | `infrastructure/` | Recommended | Production, full control |
-| **App Runner** | `infrastructure-v2/` | Alternative | Simplicity, lower cost |
-
-Both deployments can run simultaneously and share the same ECR repository, RDS database, and Secrets Manager secrets.
-
-### Option 1: AWS App Runner (Alternative - Working)
-
-**Status:** Working - Service becomes healthy with proper configuration
-
-App Runner provides a simpler, fully managed alternative to ECS Fargate. After initial failures with health checks, we resolved the issues by maximizing health check timeouts and filtering subnets to App Runner-supported availability zones.
-
-**Infrastructure location:** `infrastructure-v2/`
-
-**Architecture:**
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                         Internet                                 │
-└─────────────────────────────────┬───────────────────────────────┘
-                                  │
-                                  ▼
-                    ┌─────────────────────────┐
-                    │      App Runner         │
-                    │   (HTTPS automatic)     │
-                    │      Port 3000          │
-                    └───────────┬─────────────┘
-                                │
-                    ┌───────────┴───────────┐
-                    │    VPC Connector      │
-                    └───────────┬───────────┘
-                                │
-              ┌─────────────────┼─────────────────┐
-              │                 │                 │
-              ▼                 ▼                 ▼
-    ┌─────────────────┐  ┌────────────┐  ┌──────────────┐
-    │ RDS PostgreSQL  │  │VPC Endpoint│  │ VPC Endpoint │
-    │   (shared)      │  │  Bedrock   │  │Secrets Mgr   │
-    └─────────────────┘  └────────────┘  └──────────────┘
-```
-
-**Note:** VPC endpoints are required because App Runner with VPC egress cannot reach AWS services via public internet without a NAT Gateway.
-
-**Key configuration that made it work:**
-
-1. **Maximized health check timeouts:** App Runner limits timeout to 20 seconds max. By using max values for all parameters, we provide ~400 seconds of grace period for Next.js startup:
-   ```hcl
-   health_check_configuration {
-     path                = "/api/health"
-     protocol            = "HTTP"
-     timeout             = 20  # Max allowed (was 10)
-     interval            = 20  # Max allowed (was 10)
-     healthy_threshold   = 1
-     unhealthy_threshold = 20  # Max allowed - gives 20 × 20 = 400s grace period
-   }
-   ```
-
-2. **Filtered subnets for VPC Connector:** App Runner does NOT support all availability zones. In us-east-1, `use1-az3` is not supported. The Terraform filters subnets:
-   ```hcl
-   locals {
-     apprunner_supported_azs = ["use1-az1", "use1-az2", "use1-az4", "use1-az5", "use1-az6"]
-   }
-
-   # Filter subnets to only those in App Runner supported AZs
-   locals {
-     apprunner_subnet_ids = [
-       for subnet in data.aws_subnet.default : subnet.id
-       if contains(local.apprunner_supported_azs, subnet.availability_zone_id)
-     ]
-   }
-   ```
-
-3. **Reuses existing infrastructure:** References ECR repository and Secrets Manager secrets from `infrastructure/` via data sources, avoiding duplication.
-
-**Deployment:**
-```bash
-cd infrastructure-v2
-terraform init
-terraform plan
-terraform apply
-
-# After deployment, get the service URL
-terraform output apprunner_service_url
-
-# Trigger new deployments after pushing to ECR
-aws apprunner start-deployment --service-arn $(terraform output -raw apprunner_service_arn)
-```
-
-**Advantages over ECS Fargate:**
-- Simpler setup (no ALB, fewer resources)
-- Automatic HTTPS (no CloudFront needed)
-- Automatic scaling built-in
-- Lower base cost when idle
-
-**Trade-offs:**
-- Less control over networking
-- Health check timeout limited to 20 seconds
-- Limited AZ support requires subnet filtering
-- Debugging is harder (less logging visibility)
-
-**Previous issues (now resolved):**
-- Health check failures → Fixed with maximized timeouts
-- VPC Connector AZ errors → Fixed by filtering to supported AZs
-- Proxy middleware interference → Already fixed in `proxy.ts` with `/api/health` bypass
-- Bedrock connection timeouts → Fixed with VPC endpoint for `bedrock-runtime`
-
-**Known limitation - No external internet access:**
-
-When App Runner uses `egress_type = "VPC"`, all outbound traffic goes through the VPC connector. The infrastructure includes VPC endpoints for AWS services (Bedrock, Secrets Manager), but **external internet resources are not accessible** without a NAT Gateway (~$32/month).
+When App Runner uses VPC egress (`egress_type = "VPC"`), all outbound traffic goes through the VPC connector. The infrastructure includes VPC endpoints for AWS services, but **external internet resources are not accessible** without a NAT Gateway (~$32/month).
 
 This means:
-- ✅ Bedrock API calls work (via VPC endpoint)
-- ✅ Secrets Manager works (via VPC endpoint)
-- ✅ RDS database works (within VPC)
-- ❌ External URLs like `avatar.vercel.sh` will timeout
+- Bedrock API calls work (via VPC endpoint)
+- Secrets Manager works (via VPC endpoint)
+- RDS database works (within VPC)
+- External URLs like `avatar.vercel.sh` will timeout
 
 **Impact:** Avatar images from external sources won't load (non-critical, cosmetic only). The core application functionality is unaffected.
 
 **To enable external internet access**, add a NAT Gateway to the infrastructure. This is not included by default due to cost.
 
-### Option 2: ECS Express (Not Recommended)
+### AUTH_URL (Optional)
 
-**Status:** Failed - Terraform management issues
+With `AUTH_TRUST_HOST=true`, NextAuth.js automatically derives the URL from the Host header, so `AUTH_URL` is not required. You only need to set it explicitly if using a custom domain or for security hardening.
 
-ECS Express is a newer, simplified ECS deployment option that AWS manages behind the scenes. The application successfully deployed and became healthy, but we encountered critical issues with infrastructure management.
+### Health Check Timeout
 
-**Issues encountered:**
+App Runner limits health check timeout to 20 seconds maximum. The configuration maximizes all timeout values to provide ~400 seconds of grace period for Next.js startup:
 
-1. **Service replacement takes hours:** When making configuration changes, Terraform attempts to replace the ECS Express service. AWS's internal management of ECS Express resources causes deletions to take 2-4+ hours.
+```hcl
+health_check_configuration {
+  protocol            = "HTTP"
+  path                = "/api/health"
+  interval            = 20  # seconds between checks (max allowed)
+  timeout             = 20  # wait 20s for response (max allowed)
+  healthy_threshold   = 1   # 1 success = healthy
+  unhealthy_threshold = 20  # 20 failures before unhealthy (max allowed)
+}
+```
 
-2. **Terraform state inconsistencies:** The AWS provider reported "inconsistent result after apply" errors when updating environment variables. The API would reorder environment variable lists, causing state mismatches.
-   ```
-   Error: Provider produced inconsistent result after apply
-   .primary_container[0].environment[0].name: was "NODE_ENV", but now "AUTH_TRUST_HOST"
-   ```
+### App Runner Availability Zone Support
 
-3. **Cannot force new deployments easily:** Unlike standard ECS, forcing a new deployment required waiting for the full service replacement cycle.
+App Runner does not support all availability zones. In us-east-1, `use1-az3` is not supported. The Terraform configuration automatically filters subnets to supported AZs:
 
-4. **Module compatibility issues:** The `terraform-aws-modules/ecs` module's `express-service` submodule had compatibility issues with AWS provider v6, requiring specific attribute names that weren't well-documented:
-   - `cluster_name` vs `name`
-   - `fargate_capacity_providers` vs `cluster_capacity_providers`
-   - `auto_scaling_metric` must be `AVERAGE_CPU` not `AverageCPUUtilization`
-
-5. **Limited control:** AWS manages many resources internally (load balancer, target groups, etc.), making it difficult to customize health check settings or networking.
-
-**Conclusion:** ECS Express is too new and has significant issues with Terraform lifecycle management. The inability to quickly iterate on configuration changes makes it unsuitable for active development.
-
-### Option 3: ECS Fargate with ALB (Recommended - Primary)
-
-**Status:** Working - Production recommended
-
-Standard ECS Fargate with an Application Load Balancer provides full control over all resources and reliable Terraform management.
-
-**Advantages:**
-- Full control over health check configuration
-- Standard ECS deployment model with predictable behavior
-- Quick service updates via `aws ecs update-service --force-new-deployment`
-- Native AWS resources without module compatibility issues
-- Clear separation of concerns (cluster, service, task definition, ALB, target groups)
-
-**Trade-offs:**
-- More Terraform code to maintain
-- Slightly higher cost due to ALB (~$16/month)
-- Manual configuration of IAM roles and security groups
+```hcl
+locals {
+  apprunner_supported_azs = ["use1-az1", "use1-az2", "use1-az4", "use1-az5", "use1-az6"]
+}
+```
 
 ---
 
@@ -389,15 +286,15 @@ Standard ECS Fargate with an Application Load Balancer provides full control ove
 **Solution:**
 1. Ensure models are enabled in AWS Console > Bedrock > Model access
 2. For Claude models, use inference profile IDs (prefixed with `us.`) not direct model IDs
-3. Check that the ECS task role has the correct Bedrock permissions
+3. Check that the App Runner instance role has the correct Bedrock permissions
 
 ### Bedrock Inference Profile Required
 
 **Error:** `Invocation of model ID anthropic.claude-* with on-demand throughput isn't supported`
 
-**Solution:** Use inference profile model IDs:
-- ❌ `anthropic.claude-3-5-haiku-20241022-v1:0`
-- ✅ `us.anthropic.claude-3-5-haiku-20241022-v1:0`
+**Solution:** Use inference profile model IDs (prefixed with `us.`):
+- Wrong: `anthropic.claude-3-5-haiku-20241022-v1:0`
+- Correct: `us.anthropic.claude-3-5-haiku-20241022-v1:0`
 
 ### Claude Models Access Denied (Marketplace)
 
@@ -405,7 +302,7 @@ Standard ECS Fargate with an Application Load Balancer provides full control ove
 
 **Cause:** Claude models in Bedrock require AWS Marketplace subscription verification. The IAM role needs marketplace permissions.
 
-**Solution:** Ensure the task/instance role includes marketplace permissions:
+**Solution:** Ensure the App Runner instance role includes marketplace permissions:
 ```hcl
 {
   Effect = "Allow"
@@ -417,17 +314,16 @@ Standard ECS Fargate with an Application Load Balancer provides full control ove
 }
 ```
 
-This is already included in both `infrastructure/` and `infrastructure-v2/` IAM policies. If you see this error:
+This is already included in the infrastructure IAM policies. If you see this error:
 1. Run `terraform apply` to update IAM policies
 2. Wait 5 minutes for IAM propagation
-3. For ECS: Force a new deployment with `aws ecs update-service --cluster <cluster> --service <service> --force-new-deployment`
-4. For App Runner: Trigger deployment with `aws apprunner start-deployment --service-arn <arn>`
+3. Trigger deployment with `aws apprunner start-deployment --service-arn <arn>`
 
-### AWS Credentials Not Found in ECS
+### AWS Credentials Not Found
 
 **Error:** `AWS SigV4 authentication requires AWS credentials`
 
-**Solution:** The application must use the ECS container credentials provider. Ensure `providers.ts` includes:
+**Solution:** The application must use the container credentials provider. Ensure `providers.ts` includes:
 ```typescript
 import { fromContainerMetadata, fromEnv } from "@aws-sdk/credential-providers";
 
@@ -447,21 +343,21 @@ const bedrock = createAmazonBedrock({
 
 **Error:** `UntrustedHost: Host must be trusted`
 
-**Solution:** Set `AUTH_TRUST_HOST=true` environment variable in the ECS task definition. This is required when running behind a load balancer where the internal hostname differs from the public URL.
+**Solution:** Set `AUTH_TRUST_HOST=true` environment variable. This is required when running behind a load balancer or reverse proxy.
 
 ### Database Connection Failed
 
 **Error:** `Connection refused` or `timeout`
 
 **Solution:**
-1. Check RDS security group allows connections from ECS security group
+1. Check RDS security group allows connections from App Runner VPC connector
 2. Verify `POSTGRES_URL` secret contains correct connection string
 3. Ensure RDS instance is running
-4. For initial setup, RDS is publicly accessible - verify your IP can connect
+4. For initial setup, RDS is publicly accessible - verify your IP can connect for migrations
 
 ### Health Check Failing
 
-**Error:** ECS tasks failing health checks
+**Error:** App Runner service unhealthy
 
 **Solution:**
 1. Verify `/api/health` endpoint returns 200 OK
@@ -471,35 +367,8 @@ const bedrock = createAmazonBedrock({
      return NextResponse.next();
    }
    ```
-3. Check CloudWatch logs: `/ecs/<service-name>`
+3. Check CloudWatch logs: `/apprunner/<service-name>`
 4. Ensure all environment variables are set correctly
-
-### ERR_TOO_MANY_REDIRECTS (Redirect Loop)
-
-**Error:** Browser shows `ERR_TOO_MANY_REDIRECTS` when accessing the application
-
-**Cause:** Cookie name mismatch between NextAuth session creation and token retrieval. This happens because:
-1. CloudFront uses `origin_protocol_policy = "http-only"` to connect to ALB
-2. CloudFront sets `x-forwarded-proto: http` (the origin protocol, not the viewer protocol)
-3. NextAuth creates secure cookies based on `AUTH_URL=https://...`
-4. But token retrieval looks for non-secure cookies based on `x-forwarded-proto: http`
-
-**Solution:** The `proxy.ts` middleware must detect HTTPS based on `AUTH_URL` when set:
-```typescript
-const authUrl = process.env.AUTH_URL;
-const forwardedProto = request.headers.get("x-forwarded-proto");
-const isHttps = authUrl?.startsWith("https://") ||
-                forwardedProto === "https" ||
-                request.nextUrl.protocol === "https:";
-
-const token = await getToken({
-  req: request,
-  secret: process.env.AUTH_SECRET,
-  secureCookie: isHttps,
-});
-```
-
-This ensures the cookie name matches what NextAuth created, regardless of CloudFront's internal protocol handling.
 
 ### Docker Build Fails
 
@@ -525,7 +394,6 @@ terraform destroy
 
 1. **Disable public RDS access** after initial setup by setting `publicly_accessible = false`
 2. **Enable deletion protection** on RDS for production: `deletion_protection = true`
-3. **Restrict RDS security group** to only allow connections from ECS security group
-4. **Add HTTPS** by attaching an ACM certificate to the ALB
-5. **Rotate secrets** regularly using AWS Secrets Manager rotation
-6. **Enable CloudWatch alarms** for monitoring and alerting
+3. **Restrict RDS security group** to only allow connections from VPC connector security group
+4. **Rotate secrets** regularly using AWS Secrets Manager rotation
+5. **Enable CloudWatch alarms** for monitoring and alerting

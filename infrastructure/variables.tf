@@ -4,10 +4,16 @@ variable "aws_region" {
   default     = "us-east-1"
 }
 
-variable "environment" {
-  description = "Environment name (e.g., prod, staging)"
+variable "aws_profile" {
+  description = "AWS CLI profile to use"
   type        = string
-  default     = "prod"
+  default     = "default"
+}
+
+variable "environment" {
+  description = "Environment name (e.g., dev, prod, staging)"
+  type        = string
+  default     = "dev"
 }
 
 variable "db_password" {
@@ -20,4 +26,10 @@ variable "auth_secret" {
   description = "Secret key for NextAuth.js JWT signing"
   type        = string
   sensitive   = true
+}
+
+variable "apprunner_services" {
+  description = "List of App Runner service names to create (empty = no services, allows staged deployment)"
+  type        = list(string)
+  default     = []
 }
