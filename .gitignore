@@ -42,3 +42,18 @@ yarn-error.log*
 /playwright-report/
 /blob-report/
 /playwright/*
+
+# Terraform
+*.tfstate
+*.tfstate.*
+.terraform/
+.terraform.lock.hcl
+*.tfvars
+!example.tfvars
+crash.log
+crash.*.log
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+*.key
