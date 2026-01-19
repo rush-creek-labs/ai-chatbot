@@ -316,6 +316,15 @@ resource "aws_iam_role_policy" "ecs_task_bedrock" {
           "arn:aws:bedrock:us-east-2::foundation-model/anthropic.claude-*",
           "arn:aws:bedrock:us-west-2::foundation-model/anthropic.claude-*"
         ]
+      },
+      {
+        # Required for Claude models - verifies AWS Marketplace subscription
+        Effect = "Allow"
+        Action = [
+          "aws-marketplace:ViewSubscriptions",
+          "aws-marketplace:Subscribe"
+        ]
+        Resource = "*"
       }
     ]
   })

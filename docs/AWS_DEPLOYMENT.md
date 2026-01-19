@@ -20,7 +20,7 @@ This document describes the AWS deployment architecture for the AI Chatbot.
 - **Compute:** AWS ECS Fargate (containerized Next.js)
 - **Load Balancer:** Application Load Balancer (ALB)
 - **Database:** Amazon RDS PostgreSQL (db.t3.micro - free tier eligible)
-- **AI Models:** Amazon Bedrock (Claude 3.5 via inference profiles, Amazon Nova)
+- **AI Models:** Amazon Bedrock (Claude 4.5/4/3.5 via inference profiles, Amazon Nova)
 - **Infrastructure:** Terraform
 
 ## Available AI Models
@@ -29,8 +29,12 @@ Models are accessed via Amazon Bedrock. Claude models require inference profiles
 
 | Model ID | Name | Use Case |
 |----------|------|----------|
-| `us.anthropic.claude-3-5-haiku-20241022-v1:0` | Claude 3.5 Haiku | Fast responses, artifacts |
-| `us.anthropic.claude-3-5-sonnet-20241022-v2:0` | Claude 3.5 Sonnet | Complex reasoning |
+| `us.anthropic.claude-sonnet-4-5-20250929-v1:0` | Claude Sonnet 4.5 | Most intelligent, complex tasks |
+| `us.anthropic.claude-haiku-4-5-20251001-v1:0` | Claude Haiku 4.5 | Fast and intelligent |
+| `us.anthropic.claude-sonnet-4-20250514-v1:0` | Claude Sonnet 4 | Highly capable reasoning |
+| `us.anthropic.claude-haiku-4-20250514-v1:0` | Claude Haiku 4 | Fast, general tasks |
+| `us.anthropic.claude-3-5-haiku-20241022-v1:0` | Claude 3.5 Haiku | Fast, simple tasks |
+| `us.anthropic.claude-3-5-sonnet-20241022-v2:0` | Claude 3.5 Sonnet | Balanced speed/intelligence |
 | `amazon.nova-lite-v1:0` | Amazon Nova Lite | Title generation, simple tasks |
 | `amazon.nova-pro-v1:0` | Amazon Nova Pro | Advanced tasks |
 
@@ -58,11 +62,15 @@ Models are accessed via Amazon Bedrock. Claude models require inference profiles
 Before deploying, you must enable access to the required models:
 
 1. Go to AWS Console > Amazon Bedrock > Model access
-2. Request access to:
-   - `anthropic.claude-3-5-sonnet-20241022-v2:0`
-   - `anthropic.claude-3-5-haiku-20241022-v1:0`
-   - `amazon.nova-pro-v1:0`
-   - `amazon.nova-lite-v1:0`
+2. Request access to the models you want to use:
+   - `anthropic.claude-sonnet-4-5-20250929-v1:0` (Claude Sonnet 4.5)
+   - `anthropic.claude-haiku-4-5-20251001-v1:0` (Claude Haiku 4.5)
+   - `anthropic.claude-sonnet-4-20250514-v1:0` (Claude Sonnet 4)
+   - `anthropic.claude-haiku-4-20250514-v1:0` (Claude Haiku 4)
+   - `anthropic.claude-3-5-sonnet-20241022-v2:0` (Claude 3.5 Sonnet)
+   - `anthropic.claude-3-5-haiku-20241022-v1:0` (Claude 3.5 Haiku)
+   - `amazon.nova-pro-v1:0` (Amazon Nova Pro)
+   - `amazon.nova-lite-v1:0` (Amazon Nova Lite)
 3. Wait for approval (usually instant for Nova, may take time for Claude)
 
 ## Deployment
@@ -165,6 +173,8 @@ aws ecs update-service --cluster $CLUSTER --service $SERVICE --force-new-deploym
 
 ## Cost Breakdown
 
+### ECS Fargate (`infrastructure/`)
+
 | Service | Free Tier | Post-Free-Tier |
 |---------|-----------|----------------|
 | CloudFront | 1 TB/month (year 1) | ~$1-5/month |
@@ -175,6 +185,18 @@ aws ecs update-service --cluster $CLUSTER --service $SERVICE --force-new-deploym
 | Secrets Manager | N/A | ~$1/month |
 
 **Estimated monthly cost:** ~$50-125/month (varies with usage)
+
+### App Runner (`infrastructure-v2/`)
+
+| Service | Free Tier | Post-Free-Tier |
+|---------|-----------|----------------|
+| App Runner | None | ~$5-25/month (scales to zero) |
+| VPC Endpoints (Bedrock + Secrets Manager) | None | ~$14/month |
+| RDS PostgreSQL | 750 hours/month (year 1) | ~$15-20/month |
+| Bedrock | Pay-per-token | ~$5-50/month |
+| Secrets Manager | N/A | ~$1/month |
+
+**Estimated monthly cost:** ~$40-110/month (lower than ECS due to no ALB/CloudFront)
 
 ## Differences from Vercel Deployment
 
@@ -189,39 +211,127 @@ aws ecs update-service --cluster $CLUSTER --service $SERVICE --force-new-deploym
 
 ## Deployment Options Evaluated
 
-During development, we evaluated several AWS compute options. This section documents what we tried and the issues encountered.
+During development, we evaluated several AWS compute options. **Two options are now working:**
 
-### Option 1: AWS App Runner (Not Recommended)
+| Option | Infrastructure | Status | Best For |
+|--------|---------------|--------|----------|
+| **ECS Fargate + ALB** | `infrastructure/` | Recommended | Production, full control |
+| **App Runner** | `infrastructure-v2/` | Alternative | Simplicity, lower cost |
 
-**Status:** Failed - Health checks never passed
+Both deployments can run simultaneously and share the same ECR repository, RDS database, and Secrets Manager secrets.
 
-App Runner was the initial choice due to its simplicity and managed infrastructure. However, we encountered persistent health check failures that could not be resolved.
+### Option 1: AWS App Runner (Alternative - Working)
 
-**Issues encountered:**
+**Status:** Working - Service becomes healthy with proper configuration
 
-1. **Health check timing:** The Next.js application takes 20-30 seconds to start. App Runner's health checks would begin before the app was ready, marking the service as unhealthy.
+App Runner provides a simpler, fully managed alternative to ECS Fargate. After initial failures with health checks, we resolved the issues by maximizing health check timeouts and filtering subnets to App Runner-supported availability zones.
 
-2. **Health check configuration limitations:** Even with increased timeouts and unhealthy thresholds, the service never became healthy.
+**Infrastructure location:** `infrastructure-v2/`
 
-3. **VPC Connector complications:** Initially configured with VPC egress for database access, but this added complexity without solving the health check issue.
-
-4. **Proxy middleware interference:** The NextAuth.js middleware was intercepting health check requests and redirecting to `/api/auth/guest`. This was fixed by adding a bypass in `proxy.ts`, but health checks still failed.
-
-5. **Service stuck in "In progress":** After 10+ minutes, the App Runner service would remain in "Operation in progress" state with no clear error messages, making debugging difficult.
-
-**Configuration attempted:**
-```hcl
-health_check_configuration {
-  path                = "/api/health"
-  protocol            = "HTTP"
-  timeout             = 10
-  interval            = 10
-  healthy_threshold   = 1
-  unhealthy_threshold = 20  # Increased to allow more startup time
-}
+**Architecture:**
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                         Internet                                 │
+└─────────────────────────────────┬───────────────────────────────┘
+                                  │
+                                  ▼
+                    ┌─────────────────────────┐
+                    │      App Runner         │
+                    │   (HTTPS automatic)     │
+                    │      Port 3000          │
+                    └───────────┬─────────────┘
+                                │
+                    ┌───────────┴───────────┐
+                    │    VPC Connector      │
+                    └───────────┬───────────┘
+                                │
+              ┌─────────────────┼─────────────────┐
+              │                 │                 │
+              ▼                 ▼                 ▼
+    ┌─────────────────┐  ┌────────────┐  ┌──────────────┐
+    │ RDS PostgreSQL  │  │VPC Endpoint│  │ VPC Endpoint │
+    │   (shared)      │  │  Bedrock   │  │Secrets Mgr   │
+    └─────────────────┘  └────────────┘  └──────────────┘
 ```
 
-**Conclusion:** App Runner's health check behavior is not well-suited for Next.js applications with longer startup times. The lack of detailed logging during health check failures made debugging nearly impossible.
+**Note:** VPC endpoints are required because App Runner with VPC egress cannot reach AWS services via public internet without a NAT Gateway.
+
+**Key configuration that made it work:**
+
+1. **Maximized health check timeouts:** App Runner limits timeout to 20 seconds max. By using max values for all parameters, we provide ~400 seconds of grace period for Next.js startup:
+   ```hcl
+   health_check_configuration {
+     path                = "/api/health"
+     protocol            = "HTTP"
+     timeout             = 20  # Max allowed (was 10)
+     interval            = 20  # Max allowed (was 10)
+     healthy_threshold   = 1
+     unhealthy_threshold = 20  # Max allowed - gives 20 × 20 = 400s grace period
+   }
+   ```
+
+2. **Filtered subnets for VPC Connector:** App Runner does NOT support all availability zones. In us-east-1, `use1-az3` is not supported. The Terraform filters subnets:
+   ```hcl
+   locals {
+     apprunner_supported_azs = ["use1-az1", "use1-az2", "use1-az4", "use1-az5", "use1-az6"]
+   }
+
+   # Filter subnets to only those in App Runner supported AZs
+   locals {
+     apprunner_subnet_ids = [
+       for subnet in data.aws_subnet.default : subnet.id
+       if contains(local.apprunner_supported_azs, subnet.availability_zone_id)
+     ]
+   }
+   ```
+
+3. **Reuses existing infrastructure:** References ECR repository and Secrets Manager secrets from `infrastructure/` via data sources, avoiding duplication.
+
+**Deployment:**
+```bash
+cd infrastructure-v2
+terraform init
+terraform plan
+terraform apply
+
+# After deployment, get the service URL
+terraform output apprunner_service_url
+
+# Trigger new deployments after pushing to ECR
+aws apprunner start-deployment --service-arn $(terraform output -raw apprunner_service_arn)
+```
+
+**Advantages over ECS Fargate:**
+- Simpler setup (no ALB, fewer resources)
+- Automatic HTTPS (no CloudFront needed)
+- Automatic scaling built-in
+- Lower base cost when idle
+
+**Trade-offs:**
+- Less control over networking
+- Health check timeout limited to 20 seconds
+- Limited AZ support requires subnet filtering
+- Debugging is harder (less logging visibility)
+
+**Previous issues (now resolved):**
+- Health check failures → Fixed with maximized timeouts
+- VPC Connector AZ errors → Fixed by filtering to supported AZs
+- Proxy middleware interference → Already fixed in `proxy.ts` with `/api/health` bypass
+- Bedrock connection timeouts → Fixed with VPC endpoint for `bedrock-runtime`
+
+**Known limitation - No external internet access:**
+
+When App Runner uses `egress_type = "VPC"`, all outbound traffic goes through the VPC connector. The infrastructure includes VPC endpoints for AWS services (Bedrock, Secrets Manager), but **external internet resources are not accessible** without a NAT Gateway (~$32/month).
+
+This means:
+- ✅ Bedrock API calls work (via VPC endpoint)
+- ✅ Secrets Manager works (via VPC endpoint)
+- ✅ RDS database works (within VPC)
+- ❌ External URLs like `avatar.vercel.sh` will timeout
+
+**Impact:** Avatar images from external sources won't load (non-critical, cosmetic only). The core application functionality is unaffected.
+
+**To enable external internet access**, add a NAT Gateway to the infrastructure. This is not included by default due to cost.
 
 ### Option 2: ECS Express (Not Recommended)
 
@@ -250,9 +360,9 @@ ECS Express is a newer, simplified ECS deployment option that AWS manages behind
 
 **Conclusion:** ECS Express is too new and has significant issues with Terraform lifecycle management. The inability to quickly iterate on configuration changes makes it unsuitable for active development.
 
-### Option 3: ECS Fargate with ALB (Recommended)
+### Option 3: ECS Fargate with ALB (Recommended - Primary)
 
-**Status:** Working
+**Status:** Working - Production recommended
 
 Standard ECS Fargate with an Application Load Balancer provides full control over all resources and reliable Terraform management.
 
@@ -288,6 +398,30 @@ Standard ECS Fargate with an Application Load Balancer provides full control ove
 **Solution:** Use inference profile model IDs:
 - ❌ `anthropic.claude-3-5-haiku-20241022-v1:0`
 - ✅ `us.anthropic.claude-3-5-haiku-20241022-v1:0`
+
+### Claude Models Access Denied (Marketplace)
+
+**Error:** `Model access is denied due to IAM user or service role is not authorized to perform the required AWS Marketplace actions (aws-marketplace:ViewSubscriptions, aws-marketplace:Subscribe)`
+
+**Cause:** Claude models in Bedrock require AWS Marketplace subscription verification. The IAM role needs marketplace permissions.
+
+**Solution:** Ensure the task/instance role includes marketplace permissions:
+```hcl
+{
+  Effect = "Allow"
+  Action = [
+    "aws-marketplace:ViewSubscriptions",
+    "aws-marketplace:Subscribe"
+  ]
+  Resource = "*"
+}
+```
+
+This is already included in both `infrastructure/` and `infrastructure-v2/` IAM policies. If you see this error:
+1. Run `terraform apply` to update IAM policies
+2. Wait 5 minutes for IAM propagation
+3. For ECS: Force a new deployment with `aws ecs update-service --cluster <cluster> --service <service> --force-new-deployment`
+4. For App Runner: Trigger deployment with `aws apprunner start-deployment --service-arn <arn>`
 
 ### AWS Credentials Not Found in ECS
 
