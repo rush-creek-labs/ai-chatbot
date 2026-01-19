@@ -50,6 +50,7 @@ function PureChatHeader({
         />
       )}
 
+      {/* AWS DEPLOYMENT: Deploy with Vercel button removed - not applicable for self-hosted deployment
       <Button
         asChild
         className="order-3 hidden bg-zinc-900 px-2 text-zinc-50 hover:bg-zinc-800 md:ml-auto md:flex md:h-fit dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-zinc-200"
@@ -63,6 +64,7 @@ function PureChatHeader({
           Deploy with Vercel
         </Link>
       </Button>
+      */}
     </header>
   );
 }

@@ -119,7 +119,10 @@ export function AppSidebar({ user }: { user: User | undefined }) {
         <SidebarContent>
           <SidebarHistory user={user} />
         </SidebarContent>
-        <SidebarFooter>{user && <SidebarUserNav user={user} />}</SidebarFooter>
+        {/* AWS DEPLOYMENT: Theme toggle always visible (removed user condition and login functionality) */}
+        <SidebarFooter>
+          <SidebarUserNav />
+        </SidebarFooter>
       </Sidebar>
 
       <AlertDialog
