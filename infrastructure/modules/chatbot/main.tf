@@ -1,17 +1,6 @@
-terraform {
-  required_version = ">= 1.14.3"
-  required_providers {
-    aws = {
-      source  = "hashicorp/aws"
-      version = "~> 6.28"
-    }
-  }
-}
-
-provider "aws" {
-  region  = var.aws_region
-  profile = var.aws_profile
-}
+################################################################################
+# Locals
+################################################################################
 
 locals {
   name = "${var.environment}-ai-chatbot"
@@ -21,6 +10,10 @@ locals {
     ManagedBy   = "terraform"
   }
 }
+
+################################################################################
+# Data Sources
+################################################################################
 
 # Get current AWS account
 data "aws_caller_identity" "current" {}

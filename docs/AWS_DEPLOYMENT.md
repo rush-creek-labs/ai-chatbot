@@ -27,7 +27,37 @@ This document describes the AWS deployment architecture for the AI Chatbot using
 - **Database:** Amazon RDS PostgreSQL (db.t3.micro - free tier eligible)
 - **AI Models:** Amazon Bedrock (Claude 4.5/4/3.5 via inference profiles, Amazon Nova)
 - **Secrets:** AWS Secrets Manager
-- **Infrastructure:** Terraform
+- **Infrastructure:** Terraform (modular, multi-environment)
+
+## Infrastructure Directory Structure
+
+```
+infrastructure/
+├── modules/
+│   └── chatbot/           # Shared Terraform module
+│       ├── main.tf        # Locals, data sources
+│       ├── variables.tf   # Module input variables
+│       ├── outputs.tf     # Module outputs
+│       ├── vpc.tf         # VPC connector, security groups, endpoints
+│       ├── ecr.tf         # ECR repository
+│       ├── rds.tf         # RDS, Secrets Manager
+│       ├── iam.tf         # IAM roles and policies
+│       └── apprunner.tf   # App Runner service
+├── dev/                   # Dev environment
+│   ├── main.tf            # Provider config + module call
+│   ├── outputs.tf         # Re-export module outputs
+│   └── terraform.tfvars   # Environment-specific values (not committed)
+└── sandbox/               # Sandbox environment
+    ├── main.tf            # Provider config + module call
+    ├── outputs.tf         # Re-export module outputs
+    └── terraform.tfvars   # Environment-specific values (not committed)
+```
+
+Each environment:
+- Has its own Terraform state (stored locally in `.terraform/` by default)
+- Can use a different AWS profile via `aws_profile` variable
+- Can be deployed independently
+- Shares the same module code from `infrastructure/modules/chatbot/`
 
 ## Available AI Models
 
@@ -91,10 +121,13 @@ This approach ensures the database is migrated and the Docker image is ready bef
 
 ## Deployment
 
+Choose your target environment (`dev` or `sandbox`) and follow the steps below.
+
 ### Phase 1: Base Infrastructure
 
 ```bash
-cd infrastructure
+# Choose your environment
+cd infrastructure/dev      # or infrastructure/sandbox
 
 # Initialize Terraform
 terraform init
@@ -104,6 +137,7 @@ cat > terraform.tfvars << EOF
 db_password = "your-secure-database-password"
 auth_secret = "$(openssl rand -base64 32)"
 apprunner_services = []
+# aws_profile = "sandbox"  # Uncomment if using a different AWS profile
 EOF
 
 # Deploy base infrastructure
@@ -122,9 +156,12 @@ This creates:
 ### Phase 2: Database Migration & Image Push
 
 ```bash
+# Set your environment (dev or sandbox)
+ENV=dev
+
 # Get outputs (from project root)
-ECR_URL=$(cd infrastructure && terraform output -raw ecr_repository_url)
-RDS_ENDPOINT=$(cd infrastructure && terraform output -raw rds_endpoint)
+ECR_URL=$(cd infrastructure/$ENV && terraform output -raw ecr_repository_url)
+RDS_ENDPOINT=$(cd infrastructure/$ENV && terraform output -raw rds_endpoint)
 
 # Run database migrations (replace YOUR_PASSWORD with your db_password)
 POSTGRES_URL="postgresql://chatbot_admin:YOUR_PASSWORD@$RDS_ENDPOINT/chatbot" pnpm db:migrate
@@ -142,7 +179,7 @@ docker push $ECR_URL:latest
 # Update terraform.tfvars to add services
 # apprunner_services = ["prod"]
 
-cd infrastructure && terraform apply
+cd infrastructure/$ENV && terraform apply
 ```
 
 ### Phase 4: Update AUTH_URL (Optional)
@@ -155,10 +192,10 @@ You may want to explicitly set `AUTH_URL` if:
 
 ```bash
 # Get the service URL (from project root)
-cd infrastructure && terraform output apprunner_service_urls
+cd infrastructure/$ENV && terraform output apprunner_service_urls
 
 # Get the update command
-cd infrastructure && terraform output -json update_auth_url_commands | jq -r '.prod'
+cd infrastructure/$ENV && terraform output -json update_auth_url_commands | jq -r '.prod'
 
 # Run the update command (copy and execute the output)
 ```
@@ -175,18 +212,21 @@ curl https://<service-url>/api/health
 To deploy updates after the initial setup:
 
 ```bash
+# Set your environment (dev or sandbox)
+ENV=dev
+
 # Build new image (from project root)
 docker build -t ai-chatbot .
 
 # Tag and push
-ECR_URL=$(cd infrastructure && terraform output -raw ecr_repository_url)
+ECR_URL=$(cd infrastructure/$ENV && terraform output -raw ecr_repository_url)
 docker tag ai-chatbot:latest $ECR_URL:latest
 docker push $ECR_URL:latest
 
 # Trigger new deployment
-cd infrastructure && terraform output -json deployment_commands | jq -r '.prod'
+cd infrastructure/$ENV && terraform output -json deployment_commands | jq -r '.prod'
 # Or directly:
-aws apprunner start-deployment --service-arn $(cd infrastructure && terraform output -json apprunner_service_arns | jq -r '.prod')
+aws apprunner start-deployment --service-arn $(cd infrastructure/$ENV && terraform output -json apprunner_service_arns | jq -r '.prod')
 ```
 
 ## Multiple Environments
@@ -381,10 +421,13 @@ const bedrock = createAmazonBedrock({
 
 ## Destroying Infrastructure
 
-To tear down all AWS resources:
+To tear down all AWS resources for an environment:
 
 ```bash
-cd infrastructure
+# Set your environment (dev or sandbox)
+ENV=dev
+
+cd infrastructure/$ENV
 terraform destroy
 ```
 

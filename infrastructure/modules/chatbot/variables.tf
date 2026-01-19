@@ -1,19 +1,11 @@
 variable "aws_region" {
   description = "AWS region for deployment"
   type        = string
-  default     = "us-east-1"
-}
-
-variable "aws_profile" {
-  description = "AWS CLI profile to use"
-  type        = string
-  default     = "default"
 }
 
 variable "environment" {
   description = "Environment name (e.g., dev, prod, staging)"
   type        = string
-  default     = "dev"
 }
 
 variable "db_password" {
